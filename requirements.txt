@@ -38,7 +38,7 @@ toolz>=1.0.0
 aiofiles==23.2.1
 humanize==4.9.0
 prometheus-client==0.20.0
-pygments==2.18.0
+pygments==2.20.0
 opt-einsum==3.3.0
 treescope>=0.1.7
 typeguard==2.13.3
