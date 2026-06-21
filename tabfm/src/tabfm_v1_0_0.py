@@ -60,7 +60,7 @@ class Config:
   y_embedding_scheme: YEmbeddingScheme = (
       YEmbeddingScheme.ADD_Y_TO_X_POST_EMBEDDING
   )
-  use_bias: bool = True
+  use_bias: bool = False
 
   def to_dict(self) -> Dict[str, Any]:
     return {
