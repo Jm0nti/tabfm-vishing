@@ -15,7 +15,22 @@ keywords = []
 
 # pip dependencies of the project
 # Installed locally with `pip install -e .`
-dependencies = []
+# Pinned versions for the full reproducible environment are in requirements.txt.
+dependencies = [
+    "absl-py",
+    "chex",
+    "einops",
+    "flax",
+    "jax",
+    "jaxlib",
+    "jaxtyping",
+    "numpy",
+    "optax",
+    "orbax-checkpoint",
+    "pandas",
+    "scikit-learn",
+    "huggingface-hub",
+]
 
 # `version` is automatically set by flit to use `tabfm.__version__`
 dynamic = ["version"]
@@ -34,6 +49,13 @@ dev = [
     "pytest-xdist",
     "pylint>=2.6.0",
     "pyink",
+]
+
+# GPU support. The base `jax`/`jaxlib` deps are CPU-only; install this extra
+# (`pip install tabfm[cuda]`) to pull the CUDA 12 plugin + NVIDIA libraries for
+# GPU execution. Kept optional so CPU-only / macOS / CI installs stay light.
+cuda = [
+    "jax[cuda12]",
 ]
 
 [tool.pyink]

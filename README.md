@@ -18,6 +18,13 @@ cd tabfm
 pip install -e .
 ```
 
+The base install uses CPU-only JAX. For GPU execution, install the `cuda`
+extra to pull the CUDA 12 plugin and NVIDIA libraries:
+
+```bash
+pip install -e .[cuda]
+```
+
 ### Requirements
 For a complete list of pinned dependencies and versions, please see [requirements.txt](requirements.txt). The core requirements are:
 *   Python >= 3.10
