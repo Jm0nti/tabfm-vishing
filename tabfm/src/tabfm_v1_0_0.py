@@ -105,10 +105,10 @@ class RegressionConfig(Config):
   loss: str = "rmse"
 
 
-# Process-wide memo of restored models. Caching avoids re-running the ~19s
-# Orbax checkpoint restore on every call (e.g. AutoGluon / TabArena bagging
-# fits many child models in one process); the restored weights are immutable
-# and shared safely across callers.
+# Process-wide memo of restored models. Caching avoids re-running the Orbax
+# checkpoint restore on every call (e.g. AutoGluon / TabArena bagging fits many
+# child models in one process); the restored weights are immutable and shared
+# safely across callers.
 #
 # It is a dict keyed by load settings (model_type, checkpoint_path, step,
 # attention_impl, dtype) rather than a single slot for two reasons:
