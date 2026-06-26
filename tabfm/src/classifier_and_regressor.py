@@ -26,7 +26,6 @@ Key classes:
   - TabFMRegressor:  sklearn-compatible TabFM regressor.
 """
 
-import argparse
 import collections
 import itertools
 import math
@@ -37,7 +36,6 @@ from collections import OrderedDict
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from absl import flags, logging
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -1390,7 +1388,6 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
   def __init__(
       self,
       model: Any,
-      config: Optional[Union[argparse.Namespace, flags.FlagValues]] = None,
       n_estimators: int = 32,
       norm_methods: Optional[Union[str, List[str]]] = None,
       feat_shuffle_method: str = "latin",
@@ -1409,7 +1406,6 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
 
     Args:
       model: Pre-trained TabFM model (NNX module).
-      config: Model configuration (absl flags or argparse namespace).
       n_estimators: Number of ensemble members.
       norm_methods: Normalization method(s) for the ensemble. Defaults to
         ``["none", "power"]``.
@@ -1430,7 +1426,6 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
         ``"frequency"``).
     """
     self.model = model
-    self.config = config
     self.n_estimators = n_estimators
     self.norm_methods = norm_methods
     self.feat_shuffle_method = feat_shuffle_method
@@ -1475,8 +1470,7 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
 
     Raises:
       ValueError
-        If the number of classes exceeds the model's maximum supported classes
-        and hierarchical classification is disabled.
+        If the number of classes exceeds the model's maximum supported classes.
     """
     check_classification_targets(y)
 
@@ -1491,11 +1485,10 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
     self.classes_ = self.y_encoder_.categories_[0]
     self.n_classes_ = len(self.classes_)
 
-    if self.n_classes_ > self.model.max_classes and self.verbose:
-      print(
-          f"The number of classes ({self.n_classes_}) exceeds the max number of"
-          f" classes ({self.model.max_classes}) natively supported by the"
-          " model. Therefore, hierarchical classification is used."
+    if self.n_classes_ > self.model.max_classes:
+      raise ValueError(
+          f"The number of classes ({self.n_classes_}) exceeds the maximum number"
+          f" of classes ({self.model.max_classes}) supported by the model."
       )
 
     #  Transform input features
@@ -1867,7 +1860,6 @@ class TabFMRegressor(RegressorMixin, BaseEstimator):
   def __init__(
       self,
       model: Any,
-      config: Optional[Union[argparse.Namespace, flags.FlagValues]] = None,
       n_estimators: int = 32,
       norm_methods: Optional[Union[str, List[str]]] = None,
       feat_shuffle_method: str = "latin",
@@ -1883,7 +1875,6 @@ class TabFMRegressor(RegressorMixin, BaseEstimator):
 
     Args:
       model: Pre-trained TabFM model (NNX module).
-      config: Model configuration (absl flags or argparse namespace).
       n_estimators: Number of ensemble members.
       norm_methods: Normalization method(s) for the ensemble.  Defaults to
         ``["none", "power"]``.
@@ -1899,7 +1890,6 @@ class TabFMRegressor(RegressorMixin, BaseEstimator):
         ``"frequency"``).
     """
     self.model = model
-    self.config = config
     self.n_estimators = n_estimators
     self.norm_methods = norm_methods
     self.feat_shuffle_method = feat_shuffle_method
@@ -2050,7 +2040,7 @@ class TabFMRegressor(RegressorMixin, BaseEstimator):
       setattr(self, _has_compiled_attr, _predict_step_fn)
 
     _predict_step_compiled = getattr(self, _has_compiled_attr)
-    batch_size_per_process = getattr(self, "batch_size", 1) or Xs.shape[0]
+    batch_size_per_process = self.batch_size or Xs.shape[0]
     n_batches = math.ceil(Xs.shape[0] / batch_size_per_process)
     if n_batches > 1:
       Xs_split = np.array_split(Xs, n_batches)
@@ -2156,13 +2146,7 @@ class TabFMRegressor(RegressorMixin, BaseEstimator):
     cat_masks_all = np.stack(cat_masks_all, axis=0)
 
     output = self._batch_forward(Xs_all, ys_all, cat_masks_all)
-    loss = self.model.loss if hasattr(self.model, "loss") else (self.config.loss if self.config else "mse")
-    if loss == "rmse" or loss == "mse":
-      predictions = output.squeeze(-1)
-    else:
-      raise ValueError(
-          f"Unsupported loss for regression predict: {loss}"
-      )
+    predictions = output.squeeze(-1)
 
     avg_predictions = np.mean(predictions, axis=0)
     return self.y_scaler_.inverse_transform(avg_predictions.reshape(-1, 1)).flatten()

@@ -66,14 +66,6 @@ class AttentionImplementation(str, enum.Enum):
   NONE = 'none'
 
 
-@jt.typed
-def _round_to_multiple_of(val: int, multiple: int) -> int:
-  """Rounds a value up to the nearest multiple of 'multiple'."""
-  assert multiple > 0, f'multiple must be positive. Got {multiple}'
-  assert val >= 0, f'val must be non-negative. Got {val}'
-  return val + (multiple - val % multiple) % multiple
-
-
 # Rotary Embedding
 
 
@@ -371,38 +363,7 @@ class RotaryEmbedding(nnx.Module):
 
 
 # ----------------------------------------------------------------------------
-# 1. Unchanged Data Structures & Placeholders
-#
-# This section contains code that is framework-agnostic or requires a
-# user-provided implementation.
-# ----------------------------------------------------------------------------
-
-
-class ClassNode:
-  """Node in the hierarchical classification tree for handling many-class problems.
-
-  This class is framework-agnostic and remains unchanged from the original.
-  """
-
-  @jt.typed
-  def __init__(self, depth: int = 0):
-    """Initializes the ClassNode.
-
-    Args:
-      depth: Depth of the node in the tree.
-    """
-    self.depth: int = depth
-    self.is_leaf: bool = False
-    self.classes_: Optional[jt.Int[jax.Array | np.ndarray, 'K']] = None
-    self.child_nodes: list[Any] = []
-    self.class_mapping: dict[int, int] = {}
-    self.group_indices: Optional[jt.Int[jax.Array | np.ndarray, 'G']] = None
-    self.R: Optional[jt.Float[jax.Array | np.ndarray, 'B E']] = None
-    self.y: Optional[jt.Int[jax.Array | np.ndarray, 'B']] = None
-
-
-# ----------------------------------------------------------------------------
-# 2. Helper Functions
+# 1. Helper Functions
 #
 # Utility functions used by the NNX modules.
 # ----------------------------------------------------------------------------
@@ -433,7 +394,7 @@ def get_activation(activation: Union[str, Callable]) -> Callable:
 
 
 # ----------------------------------------------------------------------------
-# 3. Translated NNX Modules
+# 2. Translated NNX Modules
 #
 # flax.nnx.Module implementations.
 # ----------------------------------------------------------------------------
@@ -562,212 +523,6 @@ def _logn(n: int, dtype: jnp.dtype) -> jax.Array | np.ndarray:
   return jnp.array(math.log(max(n, 1)), dtype=dtype)
 
 
-class SSMax(nnx.Module):
-  """Scalable Softmax with learnable per-head scaling factors.
-
-  Applies scaling to queries:
-  :math:`q_{\\text{scaled}} = q \\cdot (s \\cdot \\log n)`,
-  where :math:`s` is a learnable per-head parameter.
-
-  Parameters
-  ----------
-  num_heads : int
-      Number of attention heads.
-  """
-
-  @jt.typed
-  def __init__(
-      self,
-      num_heads: int,
-      *,
-      rngs: Any,
-      dtype: DType = jnp.bfloat16,
-  ):
-    self.scales = nnx.Param(jnp.ones((num_heads,), dtype=dtype))
-
-  @jt.typed
-  def __call__(
-      self, q: jt.Float[jax.Array | np.ndarray, 'B T N D'], n: int
-  ) -> jt.Float[jax.Array | np.ndarray, 'B T N D']:
-    """Apply SSMax scaling to queries.
-
-    Args:
-      q: Query tensor after projection.
-      n: Source sequence length.
-
-    Returns:
-      Scaled query tensor.
-    """
-    logn = _logn(n, q.dtype)
-    scales = self.scales.value.reshape(1, 1, -1, 1) * logn
-    return q * scales
-
-
-class SSMaxMLP(nnx.Module):
-  """Scalable Softmax using an MLP to compute scaling factors.
-
-  Applies scaling to queries:
-  :math:`q_{\\text{scaled}} = q \\cdot \\text{mlp}(\\log n)`,
-  where the MLP learns to map sequence length to scaling factors.
-
-  Parameters
-  ----------
-  num_heads : int
-      Number of attention heads.
-
-  n_hidden : int, default=64
-      Number of hidden units in the MLP.
-
-  elementwise : bool, default=False
-      If True, apply elementwise scaling per head dimension, allowing
-      different scaling for each element in the head dimension.
-
-  head_dim : int, optional
-      Dimension of each attention head. Required if ``elementwise=True``.
-  """
-
-  @jt.typed
-  def __init__(
-      self,
-      num_heads: int,
-      n_hidden: int = 64,
-      elementwise: bool = False,
-      head_dim: Optional[int] = None,
-      *,
-      rngs: Any,
-      dtype: DType = jnp.bfloat16,
-  ):
-    self.elementwise = elementwise
-    if elementwise:
-      if head_dim is None:
-        raise ValueError('head_dim must be provided when elementwise=True')
-      out_dim = num_heads * head_dim
-    else:
-      out_dim = num_heads
-    self.l1 = nnx.Linear(1, n_hidden, rngs=rngs, dtype=dtype)
-    self.l2 = nnx.Linear(n_hidden, out_dim, rngs=rngs, dtype=dtype)
-    self.num_heads = num_heads
-
-  @jt.typed
-  def __call__(
-      self, q: jt.Float[jax.Array | np.ndarray, 'B T N D'], n: int
-  ) -> jt.Float[jax.Array | np.ndarray, 'B T N D']:
-    """Apply SSMax scaling to queries.
-
-    Args:
-      q: Query tensor after projection.
-      n: Source sequence length.
-
-    Returns:
-      Scaled query tensor.
-    """
-    logn = _logn(n, q.dtype).reshape(1, 1)
-    scales = self.l2(nnx.gelu(self.l1(logn)))
-    if self.elementwise:
-      # scales: (1, num_heads * head_dim) -> (1, 1, num_heads, head_dim)
-      head_dim = q.shape[-1]
-      scales = scales.reshape(1, 1, self.num_heads, head_dim)
-    else:
-      scales = scales.reshape(1, 1, self.num_heads, 1)
-    return q * scales
-
-
-class QASSMaxMLP(nnx.Module):
-  """Query-Aware Scalable Softmax using MLPs to compute scaling factors.
-
-  Applies scaling to queries:
-
-  .. math::
-
-      q_{\\text{scaled}} = q \\cdot \\text{base\\_mlp}(\\log n)
-      \\cdot \\big(1 + \\tanh(\\text{query\\_mlp}(q))\\big)
-
-  where the base MLP learns length-dependent scaling and the query MLP
-  learns query-dependent modulation.
-
-  Parameters
-  ----------
-  num_heads : int
-      Number of attention heads.
-
-  head_dim : int
-      Dimension of each attention head.
-
-  n_hidden : int, default=64
-      Number of hidden units in the MLPs.
-
-  elementwise : bool, default=False
-      If True, apply elementwise scaling per head dimension, allowing
-      different scaling for each element in the head dimension.
-  """
-
-  @jt.typed
-  def __init__(
-      self,
-      num_heads: int,
-      head_dim: int,
-      n_hidden: int = 64,
-      elementwise: bool = False,
-      *,
-      rngs: Any,
-      dtype: DType = jnp.bfloat16,
-  ):
-    self.num_heads = num_heads
-    self.head_dim = head_dim
-    self.elementwise = elementwise
-    self.dtype = dtype
-
-    if elementwise:
-      base_out_dim = num_heads * head_dim
-      query_out_dim = head_dim
-    else:
-      base_out_dim = num_heads
-      query_out_dim = 1
-
-    self.base_l1 = nnx.Linear(1, n_hidden, rngs=rngs, dtype=dtype)
-    self.base_l2 = nnx.Linear(n_hidden, base_out_dim, rngs=rngs, dtype=dtype)
-
-    self.query_l1 = nnx.Linear(head_dim, n_hidden, rngs=rngs, dtype=dtype)
-    # Initialize last layer with zeros
-    self.query_l2 = nnx.Linear(
-        n_hidden,
-        query_out_dim,
-        rngs=rngs,
-        dtype=dtype,
-        kernel_init=nnx.initializers.zeros,
-        bias_init=nnx.initializers.zeros,
-    )
-
-  @jt.typed
-  def __call__(
-      self, q: jt.Float[jax.Array | np.ndarray, 'B T N D'], n: int
-  ) -> jt.Float[jax.Array | np.ndarray, 'B T N D']:
-    """Apply QASSMax scaling to queries.
-
-    Args:
-      q: Query tensor after projection.
-      n: Source sequence length.
-
-    Returns:
-      Scaled query tensor.
-    """
-    logn = _logn(n, q.dtype).reshape(1, 1)
-
-    base_scales = self.base_l2(nnx.gelu(self.base_l1(logn)))
-    if self.elementwise:
-      base_scales = base_scales.reshape(1, 1, self.num_heads, self.head_dim)
-      query_out = self.query_l2(nnx.gelu(self.query_l1(q)))
-      modulation = 1 + jnp.tanh(query_out)
-    else:
-      base_scales = base_scales.reshape(1, 1, self.num_heads, 1)
-      query_out = self.query_l2(nnx.gelu(self.query_l1(q)))
-      modulation = 1 + jnp.tanh(query_out)
-
-    scales = base_scales * modulation
-
-    return q * scales
-
-
 @jt.typed
 def _extract_kv_from_cache(
     cached_kv: Tuple[jt.Float[jax.Array | np.ndarray, 'B T N D'],
@@ -807,49 +562,6 @@ def _encode_kv_into_cache(
   return (k, v)
 
 
-@jt.typed
-def create_ssmax_layer(
-    ssmax_type: str,
-    num_heads: int,
-    embed_dim: int,
-    rngs: Any,
-    dtype: DType = jnp.bfloat16,
-):
-  """Factory function to create SSMax layer based on type."""
-
-  if ssmax_type == 'none':
-    return None
-  elif ssmax_type == 'ssmax':
-    return SSMax(num_heads, rngs=rngs, dtype=dtype)
-  elif ssmax_type == 'ssmax-mlp':
-    return SSMaxMLP(num_heads, rngs=rngs, dtype=dtype)
-  elif ssmax_type == 'ssmax-mlp-elementwise':
-    return SSMaxMLP(
-        num_heads,
-        head_dim=embed_dim // num_heads,
-        elementwise=True,
-        rngs=rngs,
-        dtype=dtype,
-    )
-  elif ssmax_type == 'qassmax-mlp':
-    return QASSMaxMLP(
-        num_heads,
-        embed_dim // num_heads,
-        rngs=rngs,
-        dtype=dtype,
-    )
-  elif ssmax_type == 'qassmax-mlp-elementwise':
-    return QASSMaxMLP(
-        num_heads,
-        embed_dim // num_heads,
-        elementwise=True,
-        rngs=rngs,
-        dtype=dtype,
-    )
-  else:
-    raise ValueError(f'Unknown {ssmax_type=}')
-
-
 class MultiheadAttention(nnx.Module):
   """Enhanced multi-head attention with rotary positional embedding support.
 
@@ -866,11 +578,6 @@ class MultiheadAttention(nnx.Module):
       Number of attention heads.
   use_bias : bool, default=True
       Whether to use bias in projection layers.
-  ssmax : bool or str, default=False
-      Type of scalable softmax to use.
-      If True, equivalent to "qassmax-mlp-elementwise".
-      If False, equivalent to "none".
-      If a string, uses the specified scalable softmax type.
   rngs : nnx.Rngs
       RNGs for parameter initialization.
   """
@@ -881,7 +588,6 @@ class MultiheadAttention(nnx.Module):
       embed_dim: int,
       num_heads: int,
       attention_impl: AttentionImplementation = AttentionImplementation.JAX,
-      ssmax: Union[bool, str] = False,
       zero_out_proj_init: bool = False,
       use_bias: bool = True,
       *,
@@ -894,15 +600,6 @@ class MultiheadAttention(nnx.Module):
     self.attention_impl = attention_impl
     self.dtype = dtype
 
-    if isinstance(ssmax, bool):
-      ssmax = 'qassmax-mlp-elementwise' if ssmax else 'none'
-    self.ssmax_layer = create_ssmax_layer(
-        ssmax_type=ssmax,
-        num_heads=num_heads,
-        embed_dim=embed_dim,
-        rngs=rngs,
-        dtype=dtype,
-    )
 
     assert (
         self.head_dim * num_heads == self.embed_dim
@@ -1034,9 +731,6 @@ class MultiheadAttention(nnx.Module):
       k = self.key_ln(k)
     q = self.per_dim_scale(q)
 
-    # Apply SSMax if provided
-    if self.ssmax_layer is not None:
-      q = self.ssmax_layer(q, src_len)
 
     new_kv = _encode_kv_into_cache(k, v)
     if attn_mask is not None:
@@ -1134,7 +828,6 @@ class MultiheadAttentionBlock(nnx.Module):
       dim_feedforward: int,
       activation: str | Callable = 'gelu',
       attention_impl: AttentionImplementation = AttentionImplementation.JAX,
-      ssmax: Union[bool, str] = False,
       zero_out_proj_init: bool = False,
       use_bias: bool = True,
       *,
@@ -1147,7 +840,6 @@ class MultiheadAttentionBlock(nnx.Module):
         rngs=rngs,
         dtype=dtype,
         attention_impl=attention_impl,
-        ssmax=ssmax,
         zero_out_proj_init=zero_out_proj_init,
     )
     self.pre_attn_ln = nnx.RMSNorm(d_model, rngs=rngs, dtype=dtype)
@@ -1305,7 +997,6 @@ class InducedSelfAttentionBlock(nnx.Module):
       num_inds: int,
       activation: Union[str, Callable] = 'gelu',
       attention_impl: AttentionImplementation = AttentionImplementation.JAX,
-      ssmax: Union[bool, str] = False,
       zero_out_proj_init: bool = False,
       use_bias: bool = True,
       *,
@@ -1332,7 +1023,6 @@ class InducedSelfAttentionBlock(nnx.Module):
         'activation': activation,
         'rngs': rngs,
         'attention_impl': attention_impl,
-        'ssmax': ssmax,
         'zero_out_proj_init': zero_out_proj_init,
         'use_bias': use_bias,
     }
@@ -1447,7 +1137,6 @@ class Encoder(Module):
       use_rope: bool = False,
       rope_base: float = 10000,
       attention_impl: AttentionImplementation = AttentionImplementation.JAX,
-      ssmax: Union[bool, str] = False,
       zero_out_proj_init: bool = False,
       use_bias: bool = True,
       *,
@@ -1475,7 +1164,6 @@ class Encoder(Module):
           dim_feedforward=dim_feedforward,
           activation=act_fn,
           attention_impl=attention_impl,
-          ssmax=ssmax,
           zero_out_proj_init=zero_out_proj_init,
           use_bias=use_bias,
           rngs=rngs,
@@ -1663,7 +1351,6 @@ class SetTransformer(Module):
       num_inds: int = 13,
       activation: str = 'gelu',
       attention_impl: AttentionImplementation = AttentionImplementation.JAX,
-      ssmax: Union[bool, str] = False,
       zero_out_proj_init: bool = False,
       use_bias: bool = True,
       *,
@@ -1691,7 +1378,6 @@ class SetTransformer(Module):
           num_inds=num_inds,
           activation=act_fn,
           attention_impl=attention_impl,
-          ssmax=ssmax,
           zero_out_proj_init=zero_out_proj_init,
           rngs=rngs,
           use_bias=use_bias,
@@ -2141,7 +1827,6 @@ class ColEmbedding(nnx.Module):
       num_inds: int,
       activation: str | Callable = 'gelu',
       attention_impl: AttentionImplementation = AttentionImplementation.JAX,
-      ssmax: Union[bool, str] = False,
       zero_out_proj_init: bool = False,
       use_bias: bool = True,
       *,
@@ -2161,7 +1846,6 @@ class ColEmbedding(nnx.Module):
         rngs=rngs,
         dtype=self.dtype,
         attention_impl=attention_impl,
-        ssmax=ssmax,
         zero_out_proj_init=zero_out_proj_init,
         use_bias=use_bias,
     )
@@ -2386,20 +2070,17 @@ class ICLearningCache:
 
 
 class ICLearning(nnx.Module):
-  """Dataset-wise in-context learning with automatic hierarchical classification support.
+  """Dataset-wise in-context learning.
 
   This module is rewritten in Flax NNX and implements in-context learning that:
   1. Takes row representations and training labels as input.
   2. Conditions the model on training examples.
   3. Makes predictions for test examples based on learned patterns.
-  4. Automatically handles both small and large label spaces.
 
   parameters
   ----------
   max_classes : int
-      Number of classes that the model supports natively. If the number of
-      classes
-      in the dataset exceeds this value, hierarchical classification is used.
+      Number of classes that the model supports.
   d_model : int
       Model dimension.
   num_blocks : int
@@ -2423,7 +2104,6 @@ class ICLearning(nnx.Module):
       nhead: int,
       dim_feedforward: int,
       activation: str = 'gelu',
-      ssmax: Union[bool, str] = False,
       zero_out_proj_init: bool = False,
       attention_impl: AttentionImplementation = AttentionImplementation.JAX,
       use_bias: bool = True,
@@ -2448,7 +2128,6 @@ class ICLearning(nnx.Module):
         activation=activation,
         use_rope=False,
         attention_impl=attention_impl,
-        ssmax=ssmax,
         zero_out_proj_init=zero_out_proj_init,
         use_bias=use_bias,
         cache_icl_input_only=cache_icl_input_only,
@@ -2460,7 +2139,6 @@ class ICLearning(nnx.Module):
       self.y_encoder = OneHotAndLinear(
           max_classes, d_model, rngs=rngs, dtype=self.dtype
       )
-      self.root: ClassNode | None = None
       self.decoder = MLP(
           in_dim=d_model,
           out_dim=max_classes,
@@ -2595,17 +2273,12 @@ class TabFM(nnx.Module):
   3. Dataset-wise in-context learning learns patterns from labeled examples and
   makes predictions.
 
-  For datasets with more than `max_classes` classes, TabFM switches to
-  hierarchical classification
-  to recursively partition classes into subgroups, forming a multi-level
-  classification tree.
+  Datasets with more than `max_classes` classes are not supported.
 
   Parameters
   ----------
   max_classes : int, default=10
-      Number of classes that the model supports natively. If the number of
-      classes
-      in the dataset exceeds this value, hierarchical classification is used.
+      Number of classes that the model supports.
   embed_dim : int, default=128
       Model dimension used in the column/row embedding transformers. For the
       in-context
@@ -2648,9 +2321,6 @@ class TabFM(nnx.Module):
       shifts.
   feature_group_size : int, default=3
       The number of features in each group when feature_group is not False.
-  ssmax : bool or str, default=False
-      Type of scalable softmax to use. Options: "none", "ssmax", "ssmax-mlp",
-      "ssmax-mlp-elementwise", "qassmax-mlp", "qassmax-mlp-elementwise".
   col_attention_impl : AttentionImplementation, default=AttentionImplementation.JAX
       Which attention implementation to use for column embedding.
   row_attention_impl : AttentionImplementation, default=AttentionImplementation.JAX
@@ -2691,7 +2361,6 @@ class TabFM(nnx.Module):
       y_embedding_scheme: YEmbeddingScheme = YEmbeddingScheme.NONE,
       y_col_embedder_encoder_nhid: int = 6,
       cache_icl_input_only: bool = False,
-      ssmax: Union[bool, str] = False,
       zero_out_proj_init: bool = False,
       use_bias: bool = True,
       feature_group: Union[bool, str] = False,
@@ -2742,7 +2411,6 @@ class TabFM(nnx.Module):
         rngs=rngs,
         dtype=self.dtype,
         attention_impl=col_attention_impl,
-        ssmax=ssmax,
         zero_out_proj_init=zero_out_proj_init,
         use_bias=use_bias,
     )
@@ -2756,7 +2424,6 @@ class TabFM(nnx.Module):
         rngs=rngs,
         dtype=self.dtype,
         attention_impl=col_attention_impl,
-        ssmax=ssmax,
         zero_out_proj_init=zero_out_proj_init,
         use_bias=use_bias,
     )
@@ -2804,7 +2471,6 @@ class TabFM(nnx.Module):
         activation=activation,
         rngs=rngs,
         dtype=self.dtype,
-        ssmax=ssmax,
         zero_out_proj_init=zero_out_proj_init,
         attention_impl=icl_attention_impl,
         use_bias=use_bias,
@@ -2895,14 +2561,20 @@ class TabFM(nnx.Module):
         d=d,
     )
 
-    if self.is_classifier and num_classes is not None and num_classes > self.icl_predictor.max_classes:
-      raise NotImplementedError('Hierarchical classification is not supported')
-    else:
-      out = self.icl_predictor(
-          representations,
-          y,
-          train_size=train_size,
+    if (
+        self.is_classifier
+        and num_classes is not None
+        and num_classes > self.icl_predictor.max_classes
+    ):
+      raise ValueError(
+          f'Number of classes ({num_classes}) exceeds the maximum supported '
+          f'({self.icl_predictor.max_classes}).'
       )
+    out = self.icl_predictor(
+        representations,
+        y,
+        train_size=train_size,
+    )
 
     return out
 
