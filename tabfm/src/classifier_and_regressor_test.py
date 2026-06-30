@@ -888,6 +888,45 @@ class StackingTest(absltest.TestCase):
     self.assertLen(patterns_none[0], 6)
     self.assertLen(patterns_power[0], 6)
 
+  def test_min_rows_for_single_val_split_classifier(self):
+    classifier = TabFMClassifier(
+        model=self.model,
+        n_estimators=1,
+        enable_nnls=True,
+        average_logits=False,
+        min_rows_for_single_val_split=2,
+        num_folds_for_cv=5,
+    )
+    X = np.random.rand(10, 3)
+    y = np.array([0, 1, 0, 1, 0, 1, 0, 1, 0, 1])
+
+    with mock.patch.object(
+        classifier, "_batch_forward", return_value=np.zeros((1, 2, 2))
+    ) as mock_forward:
+      classifier.fit(X, y)
+
+    # With 10 rows and 5 folds, val fold size is 2.
+    # It should therefore only run 1 fold instead of 5.
+    self.assertEqual(mock_forward.call_count, 1)
+
+  def test_min_rows_for_single_val_split_regressor(self):
+    regressor = TabFMRegressor(
+        model=self.model,
+        n_estimators=1,
+        enable_nnls=True,
+        min_rows_for_single_val_split=2,
+        num_folds_for_cv=5,
+    )
+    X = np.random.rand(10, 3)
+    y = np.random.rand(10)
+
+    with mock.patch.object(
+        regressor, "_batch_forward", return_value=np.zeros((1, 2, 1))
+    ) as mock_forward:
+      regressor.fit(X, y)
+
+    self.assertEqual(mock_forward.call_count, 1)
+
 
 class EnsemblePresetTest(absltest.TestCase):
 
