@@ -2697,7 +2697,7 @@ class TabFMClassifier(ClassifierMixin, BaseEstimator):
     y = np.argmax(proba[:, : self.n_classes_], axis=1)
     y_2d = y.reshape(-1, 1)
     y_decoded = self.y_encoder_.inverse_transform(y_2d)
-    return y_decoded.flatten()
+    return y_decoded.flatten().astype(self.classes_.dtype)
 
   @jt.typed
   @staticmethod
