@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # --- Ajusta esto a donde subiste el repo (carpeta que contiene pyproject.toml) ---
-REPO_DIR="${REPO_DIR:-$HOME/SageMaker/tabfm}"
+REPO_DIR="${REPO_DIR:-$HOME/SageMaker/tabfm-vishing}"
 ENV_NAME="${ENV_NAME:-tabfm-gpu}"
 
 echo ">>> 0. GPU visible en la instancia:"
